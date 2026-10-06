@@ -1,0 +1,22 @@
+{
+  "name": "niaai-slack-bot",
+  "version": "1.0.0",
+  "description": "NiaAI Slack bot — answers questions via the local NiaAI backend",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "slack": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.1.0",
+    "@slack/web-api": "^7.8.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

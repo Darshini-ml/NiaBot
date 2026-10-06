@@ -1,36 +1,73 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# NiaAI
 
-## Getting Started
+Multi-model AI chat platform with web search, document generation, automations, and integrations.
 
-First, run the development server:
+## Features
+
+- **Multi-model chat** — Route conversations through NiaAI gateway to Anthropic, OpenAI, Google, and local Ollama models
+- **Web search** — Real-time search with full page fetching, citations, and source attribution
+- **PDF / PPTX generation** — Create styled, multi-page documents from chat (cover page, TOC, themed templates)
+- **Image generation** — Generate images via provider APIs with prompt rewriting and local storage
+- **File attachments** — Upload and analyze PDF, DOCX, PPTX, XLSX, CSV, images, code, ZIP archives, and more
+- **Automations** — Scheduled and event-triggered workflows with email delivery
+- **Slack bot** — Full-featured bot with Socket Mode, threaded replies, file handling, web search, and citations
+- **Discord bot** — Slash-command and mention-based bot with streaming responses
+- **Logs dashboard** — Usage tracking with per-chat breakdowns, tool events, error logs, and token charts
+- **Voice mode** — Speech-to-text and text-to-speech support
+- **Command palette** — Quick actions and keyboard shortcuts
+
+## Setup
 
 ```bash
+# 1. Install dependencies
+npm install
+
+# 2. Configure environment
+cp .env.example .env.local
+# Fill in NIA_API_KEY at minimum — see .env.example for all options
+
+# 3. Start the dev server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The app runs at [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Slack Bot
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+cd services/slack-bot
+cp .env.example .env
+# Fill in SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET, NIA_INTERNAL_TOKEN
+npm install
+npm start
+```
 
-## Learn More
+See [services/slack-bot/README.md](services/slack-bot/README.md) for Slack app setup instructions.
 
-To learn more about Next.js, take a look at the following resources:
+### Discord Bot
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+cd services/discord-bot
+cp .env.example .env  # or create from root .env.example Discord section
+# Fill in DISCORD_BOT_TOKEN, DISCORD_CLIENT_ID
+npm install
+npm start
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+See [services/discord-bot/README.md](services/discord-bot/README.md) for Discord app setup instructions.
 
-## Deploy on Vercel
+## Project Structure
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+src/
+  app/           — Next.js app router (pages, API routes)
+  components/    — React components (chat, sidebar, modals, logs)
+  lib/           — Shared utilities (provider adapters, config, file extraction)
+services/
+  slack-bot/     — Standalone Slack bot (Socket Mode)
+  discord-bot/   — Standalone Discord bot
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## License
+
+Private — all rights reserved.
