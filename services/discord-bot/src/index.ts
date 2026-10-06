@@ -134,9 +134,9 @@ async function handleMessage(
 
   if (!isDm && message.channel.type === ChannelType.GuildText) {
     try {
-      thread = await message.startThread({
-        name: text.slice(0, 80) || 'NiaAI',
-      });
+      // Strip mentions (<@123>, <@!123>, <@&123>), collapse whitespace, max 80 chars
+      const threadName = text.replace(/<@[!&]?\d+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'NiaAI chat';
+      thread = await message.startThread({ name: threadName });
       replyChannel = thread;
     } catch {
       // May fail if already in a thread
@@ -225,10 +225,14 @@ async function handleMessage(
     const pendingImages: NiaSSEEvent[] = [];
 
     const updatePlaceholder = async (statusText: string) => {
-      const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
-      const suffix = elapsed > 3 ? ` (${elapsed}s)` : '';
+      // Don't double-append timing if the server already includes it (e.g. "Generating image… (25s)")
+      let content = statusText;
+      if (!/\(\d+s\)/.test(statusText)) {
+        const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
+        if (elapsed > 3) content += ` (${elapsed}s)`;
+      }
       try {
-        await placeholder.edit({ content: `${statusText}${suffix}`, flags: [MessageFlags.SuppressEmbeds] });
+        await placeholder.edit({ content, flags: [MessageFlags.SuppressEmbeds] });
       } catch {}
     };
 
@@ -359,8 +363,10 @@ async function handleMessage(
         if (downloaded) {
           const imgFilename = downloaded.filename.endsWith('.png') ? downloaded.filename : `${downloaded.filename}.png`;
           const attachment = new AttachmentBuilder(downloaded.buffer, { name: imgFilename });
+          // Use the user's original request as caption, not the expanded/revised prompt
+          const caption = text ? `Here's your image: ${text}` : 'Generated image';
           await replyChannel.send({
-            content: imgEvt.revised_prompt ? imgEvt.revised_prompt.slice(0, 100) : 'Generated image',
+            content: caption.slice(0, 1950),
             files: [attachment],
             flags: [MessageFlags.SuppressEmbeds],
           });
@@ -548,10 +554,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         connectionStatus.lastEventTime = new Date().toISOString();
 
         if (event.type === 'status' && event.text) {
-          const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
-          const suffix = elapsed > 3 ? ` (${elapsed}s)` : '';
+          let statusContent = event.text;
+          if (!/\(\d+s\)/.test(statusContent)) {
+            const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
+            if (elapsed > 3) statusContent += ` (${elapsed}s)`;
+          }
           try {
-            await interaction.editReply({ content: `${event.text}${suffix}` });
+            await interaction.editReply({ content: statusContent });
           } catch {}
         }
 
@@ -610,8 +619,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (downloaded) {
           const imgFilename = downloaded.filename.endsWith('.png') ? downloaded.filename : `${downloaded.filename}.png`;
           const attachment = new AttachmentBuilder(downloaded.buffer, { name: imgFilename });
+          // Use the user's original request as caption, not the expanded prompt
+          const caption = prompt ? `Here's your image: ${prompt}` : 'Generated image';
           await interaction.editReply({
-            content: imgEvt.revised_prompt ? imgEvt.revised_prompt.slice(0, 100) : 'Generated image',
+            content: caption.slice(0, 1950),
             files: [attachment],
           });
           return;
@@ -634,11 +645,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.followUp({ content: chunks[i], flags: [MessageFlags.SuppressEmbeds] });
       }
 
+      console.log(`[discord] slash=/nia replied user=${userId} elapsed=${Math.round((Date.now() - streamStartTime) / 1000)}s chunks=${chunks.length}`);
+
     } catch (err: any) {
       console.error('[discord-bot] Slash command error:', err);
-      await interaction.editReply({
-        content: `⚠️ NiaAI error: ${truncateError(err?.message || 'Unknown error')}`,
-      });
+      try {
+        await interaction.editReply({
+          content: `⚠️ NiaAI error: ${truncateError(err?.message || 'Unknown error')}`,
+        });
+      } catch {}
+      console.log(`[discord] slash=/nia error user=${userId} elapsed=${Math.round((Date.now() - streamStartTime) / 1000)}s`);
     }
     return;
   }

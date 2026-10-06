@@ -55,3 +55,7 @@ next-env.d.ts
 
 # archives / misc assets
 *.zip
+
+# nia-ide: managed by Nia IDE
+.nia/
+.claude/

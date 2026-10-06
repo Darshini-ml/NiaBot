@@ -276,16 +276,19 @@ async function handleMessage(
     const pendingFiles: NiaSSEEvent[] = [];
     const pendingImages: NiaSSEEvent[] = [];
 
-    // Helper: update placeholder with elapsed time
+    // Helper: update placeholder with elapsed time (don't double-append timing)
     const updatePlaceholder = async (statusText: string) => {
-      const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
-      const suffix = elapsed > 3 ? ` (${elapsed}s)` : '';
+      let content = statusText;
+      if (!/\(\d+s\)/.test(statusText)) {
+        const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
+        if (elapsed > 3) content += ` (${elapsed}s)`;
+      }
       try {
         await withRetry(() =>
           app.client.chat.update({
             channel,
             ts: messageTs,
-            text: `${statusText}${suffix}`,
+            text: content,
           })
         );
       } catch {}
@@ -440,7 +443,8 @@ async function handleMessage(
               thread_ts: threadTs,
               filename: imgFilename,
               file: downloaded.buffer,
-              title: imgEvt.revised_prompt ? imgEvt.revised_prompt.slice(0, 100) : 'Generated image',
+              // Use the user's original request as caption, not the expanded prompt
+              title: text ? `Here's your image: ${text}`.slice(0, 200) : 'Generated image',
             })
           );
           imageUploaded = true;

@@ -140,12 +140,25 @@ export function buildSystemPrompt(opts: {
   // 7. Formatting rule
   parts.push("Formatting rule: Use bold only for 1–3 key terms per answer; prefer plain sentences and short lists. Do not bold entire phrases or sentences.");
 
-  // 8. Slack-specific additions
+  // 8. Thread grounding (shared across integrations)
+  if (opts.source === "slack" || opts.source === "discord") {
+    parts.push("You are in a conversation thread; prior turns are provided as conversation history. Never say you lack memory or cannot remember previous messages — the full thread history is available to you.");
+    parts.push("Never contradict a prior answer you gave in this thread without citing a new source that justifies the correction.");
+    parts.push("When sources give different prices for the same product, state the official/manufacturer base price once and attribute higher figures to a variant or retailer in a short clause.");
+    parts.push("Answer directly with the information requested; do not talk about the search results themselves or say phrases like \"In the provided search results\" or \"Based on the search results\".");
+  }
+
+  // 9. Slack-specific additions
   if (opts.source === "slack") {
     parts.push("You are NiaAI, a helpful AI assistant responding in a Slack thread.");
-    parts.push("You are in a Slack thread; prior turns are provided as conversation history. Never say you lack memory or cannot remember previous messages — the full thread history is available to you.");
     parts.push("Don't wrap quoted user text in code formatting (backticks or code blocks) — use normal text or bold.");
-    parts.push("Be concise and helpful. Format with Slack-compatible markdown (use * for bold, _ for italic, ` for code, ``` for code blocks). Keep responses focused and well-structured. Answer directly with the information requested; do not talk about the search results themselves or say phrases like \"In the provided search results\" or \"Based on the search results\".");
+    parts.push("Be concise and helpful. Format with Slack-compatible markdown (use * for bold, _ for italic, ` for code, ``` for code blocks). Keep responses focused and well-structured.");
+  }
+
+  // 10. Discord-specific additions
+  if (opts.source === "discord") {
+    parts.push("You are NiaAI, a helpful AI assistant responding in a Discord thread.");
+    parts.push("Be concise and helpful. Format with Discord-compatible markdown (use **bold**, *italic*, `code`, ```code blocks```). Keep responses focused and well-structured.");
   }
 
   // Merge with existing system prompt if provided

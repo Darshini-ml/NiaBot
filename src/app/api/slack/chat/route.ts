@@ -304,6 +304,31 @@ export async function POST(req: NextRequest) {
     setChatTitle(chatId, chatTitle);
   }
 
+  // ── Search query reformulation for follow-ups ──
+  // If the current message is short/referential and there's thread history,
+  // reformulate the search query using prior context (e.g. "and in India?" → "iPhone 16 price India")
+  let searchQuery = text;
+  const FOLLOWUP_PATTERN = /^(and |what about |how about |also |but |in |for |price |cost |compare)/i;
+  const isShortFollowUp = text.split(/\s+/).length <= 8 && thread.messages.length > 1;
+  if (isShortFollowUp && (FOLLOWUP_PATTERN.test(text) || text.length < 40)) {
+    // Extract topic from the most recent assistant + user messages
+    const recentMsgs = thread.messages.slice(-4);
+    const topicParts: string[] = [];
+    for (const m of recentMsgs) {
+      if (m.role === "user" && m.content !== userContent) {
+        // Prior user message — extract the core topic (first 60 chars, no file tags)
+        const clean = m.content.replace(/<file[\s\S]*?<\/file>/g, "").trim();
+        if (clean.length > 3) topicParts.push(clean.slice(0, 60));
+      }
+    }
+    if (topicParts.length > 0) {
+      // Take the last user topic and combine with current query
+      const topic = topicParts[topicParts.length - 1];
+      searchQuery = `${topic} ${text}`.replace(/\s+/g, " ").trim();
+      console.log(`[search] source=${source} reformulated="${searchQuery}" original="${text}"`);
+    }
+  }
+
   // ── Web search ──
   let searchResults: SearchResult[] = [];
   let fetchedCount = 0;
@@ -313,10 +338,10 @@ export async function POST(req: NextRequest) {
     const searchStartTime = Date.now();
     try {
       const newsPattern = /\b(news|headline|today|this week|score|weather|stock|price)\b/i;
-      const recency = newsPattern.test(text) ? "month" : undefined;
+      const recency = newsPattern.test(searchQuery) ? "month" : undefined;
 
       const groundedPromise = (async () => {
-        const raw = await performSearch(text, recency, 8);
+        const raw = await performSearch(searchQuery, recency, 8);
         searchResults = rankAndFilterResults(raw);
 
         if (searchResults.length === 0) {
@@ -373,12 +398,48 @@ export async function POST(req: NextRequest) {
       }
 
       const totalMs = Date.now() - searchStartTime;
-      console.log(`[search] source=${source} query="${text}" results=${searchResults.length} fetched=${fetchedCount} total_targets=${totalFetchTargets} ms=${totalMs}`);
+      console.log(`[search] source=${source} query="${searchQuery}"${searchQuery !== text ? ` original="${text}"` : ""} results=${searchResults.length} fetched=${fetchedCount} total_targets=${totalFetchTargets} ms=${totalMs}`);
     } catch (err) {
       console.error("[integrations/chat] Search failed:", err);
     }
   } else if (web_search) {
-    console.log(`[search] source=${source} query="${text}" needsSearch=false`);
+    // For short follow-ups, also check if the reformulated query needs search
+    if (searchQuery !== text && needsFreshData(searchQuery)) {
+      // The original didn't trigger search but the reformulated one should
+      const searchStartTime = Date.now();
+      try {
+        const newsPattern = /\b(news|headline|today|this week|score|weather|stock|price)\b/i;
+        const recency = newsPattern.test(searchQuery) ? "month" : undefined;
+        const raw = await performSearch(searchQuery, recency, 8);
+        searchResults = rankAndFilterResults(raw);
+        if (searchResults.length > 0) {
+          const urlsToFetch = searchResults.slice(0, 6).map(r => r.url);
+          totalFetchTargets = urlsToFetch.length;
+          const pageTexts = new Map<string, string>();
+          const fetchResults = await fetchPagesWithConcurrency(urlsToFetch, 3, 4000);
+          for (const fr of fetchResults) {
+            if (fr.text && fr.chars > 100) {
+              pageTexts.set(fr.url, fr.text);
+              fetchedCount++;
+            }
+          }
+          const searchContext = buildSearchContext(searchResults, pageTexts);
+          systemMsg += searchContext;
+          const lastUserIdx = history.map(m => m.role).lastIndexOf("user");
+          if (lastUserIdx >= 0) {
+            const origContent = history[lastUserIdx].content;
+            history[lastUserIdx].content =
+              `Use the search results above to answer this question. Cite with [n].\n\nQuestion: ${origContent}`;
+          }
+        }
+        const totalMs = Date.now() - searchStartTime;
+        console.log(`[search] source=${source} query="${searchQuery}" reformulated="${text}" results=${searchResults.length} fetched=${fetchedCount} ms=${totalMs}`);
+      } catch (err) {
+        console.error("[integrations/chat] Reformulated search failed:", err);
+      }
+    } else {
+      console.log(`[search] source=${source} query="${text}" needsSearch=false`);
+    }
   }
 
   // Build final messages for the provider
