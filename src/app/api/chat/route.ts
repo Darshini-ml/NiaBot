@@ -11,6 +11,8 @@ import {
   INTENT_BYPASS_PATTERN,
   DOC_KEYWORDS,
 } from "@/lib/assistantTurn";
+import { detectConnectorIntent, getConnectorToolsForUser, executeConnectorTool } from "@/lib/connectorTools";
+import { getUserId } from "@/lib/session";
 
 // Validate once at module load — throws if NIA_GATEWAY_URL === NIA_APP_URL
 try { validateConfig(); } catch (e: any) { console.error(e.message); }
@@ -411,7 +413,7 @@ export function getLastDebugRequest() { return lastDebugRequest; }
 /* ── Main handler ──────────────────────────────────────────── */
 
 export async function POST(req: NextRequest) {
-  const { messages, model, web_search, stream, task, timezone, target_pages, strict_pages, provider: rawProvider, thinking, chatId, messageId, chatTitle: bodyTitle } = await req.json();
+  const { messages, model, web_search, stream, task, timezone, target_pages, strict_pages, provider: rawProvider, thinking, chatId, messageId, chatTitle: bodyTitle, connector, connectorId } = await req.json();
 
     // Update chat title map for future title resolution
     if (chatId) {
@@ -593,8 +595,11 @@ export async function POST(req: NextRequest) {
   const mixedIntent = isGenerationIntent && needsFreshData(userQuery);
 
   const webSearchEnabled = web_search !== false; // default ON
+  // When a connector chip is pinned, skip web search entirely
+  const pinnedConnector: string | undefined = connector; // "slack" | "discord" | undefined
+  const pinnedConnectorId: string | undefined = connectorId; // specific workspace UUID
   // Only search if NOT a pure generation intent, or if mixed intent needs facts
-  const shouldSearch = webSearchEnabled && (
+  const shouldSearch = !pinnedConnector && webSearchEnabled && (
     mixedIntent ? true : (!isGenerationIntent && needsFreshData(userQuery))
   );
 
@@ -1008,6 +1013,180 @@ export async function POST(req: NextRequest) {
           fallback_snippets: fallbackSnippets,
           results_count: searchResults.length,
         }));
+      }
+
+      // 3b. Connector tools — if user has enabled connectors and intent matches (or chip is pinned)
+      const connectorUserId = getUserId(req);
+      const connectorIntent = detectConnectorIntent(userQuery);
+      const connectorTools = getConnectorToolsForUser(connectorUserId, pinnedConnectorId);
+
+      const shouldUseConnectors = pinnedConnector
+        ? connectorTools.length > 0
+        : connectorTools.length > 0 && (connectorIntent.slack || connectorIntent.discord);
+
+      // Resolve literal [channel] placeholder → most recently active channel
+      if (pinnedConnector && userQuery.includes("[channel]")) {
+        try {
+          const toolName = pinnedConnector === "slack" ? "slack_list_channels" : "discord_list_channels";
+          const chResult = await executeConnectorTool(toolName, {}, connectorUserId, undefined, undefined, pinnedConnectorId);
+          if (!chResult.error) {
+            const channels = JSON.parse(chResult.content);
+            const topChannel = channels?.[0]?.name || "#general";
+            const resolvedQuery = userQuery.replace(/\[channel\]/g, topChannel);
+            // Update the last user message in processedMessages
+            for (let i = processedMessages.length - 1; i >= 0; i--) {
+              if (processedMessages[i].role === "user") {
+                if (typeof processedMessages[i].content === "string") {
+                  processedMessages[i].content = (processedMessages[i].content as string).replace(/\[channel\]/g, topChannel);
+                }
+                break;
+              }
+            }
+            sendEvent({ type: "status", text: `Using ${topChannel} (most active)` });
+            console.log(`[connector] resolved [channel] → ${topChannel}`);
+          }
+        } catch { /* continue without resolution */ }
+      }
+
+      if (pinnedConnector && processedMessages.length > 0 && processedMessages[0].role === "system") {
+        const providerLabel = pinnedConnector === "slack" ? "Slack" : "Discord";
+        processedMessages[0].content += `\n\nThe user is asking about their ${providerLabel} workspace; use the ${pinnedConnector} tools, not web search.`;
+      } else if (pinnedConnector) {
+        const providerLabel = pinnedConnector === "slack" ? "Slack" : "Discord";
+        processedMessages.unshift({ role: "system", content: `The user is asking about their ${providerLabel} workspace; use the ${pinnedConnector} tools, not web search.` });
+      }
+
+      if (shouldUseConnectors) {
+        const statusLabel = pinnedConnector === "slack" || connectorIntent.slack ? "Reading Slack\u2026" : "Reading Discord\u2026";
+        sendEvent({ type: "status", text: statusLabel });
+
+        try {
+          // Make a non-streaming call with tools to let the model decide what to read
+          const toolCallBody = {
+            model: model || "google/gemini-2.5-flash",
+            messages: processedMessages,
+            tools: connectorTools,
+            tool_choice: "auto",
+            stream: false,
+            max_tokens: 1024,
+          };
+
+          const toolCallRes = await fetch(`${NIA_GATEWAY_URL}/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${NIA_API_KEY}` },
+            body: JSON.stringify(toolCallBody),
+          });
+
+          if (toolCallRes.ok) {
+            const toolCallData = await toolCallRes.json();
+            const choice = toolCallData.choices?.[0];
+            const toolCalls = choice?.message?.tool_calls;
+
+            if (toolCalls && toolCalls.length > 0) {
+              // Execute tool calls in parallel (concurrency 5) with keepalive status events
+              const toolMessages: { role: string; content: string; tool_call_id?: string }[] = [
+                { role: "assistant", content: choice.message.content || "", ...({ tool_calls: toolCalls } as any) },
+              ];
+
+              const toolNames = toolCalls.map((tc: any) => tc.function?.name?.replace(/_/g, " ")).filter(Boolean);
+              sendEvent({ type: "status", text: `Running ${toolNames.join(", ")}\u2026` });
+
+              // Keepalive: send status every 5s while tools are running
+              let toolsDone = false;
+              const keepalive = setInterval(() => {
+                if (!toolsDone) sendEvent({ type: "status", text: `Still reading\u2026` });
+              }, 5000);
+
+              // Run all tool calls in parallel (up to 5 concurrent)
+              const CONCURRENCY = 5;
+              const toolEntries = toolCalls.map((tc: any) => {
+                const fnName = tc.function?.name;
+                let fnArgs: Record<string, unknown> = {};
+                try { fnArgs = JSON.parse(tc.function?.arguments || "{}"); } catch { /* empty */ }
+                return { tc, fnName, fnArgs };
+              });
+
+              const results: { tc: any; fnName: string; result: Awaited<ReturnType<typeof executeConnectorTool>>; durationMs: number }[] = [];
+              for (let i = 0; i < toolEntries.length; i += CONCURRENCY) {
+                const batch = toolEntries.slice(i, i + CONCURRENCY);
+                const batchResults = await Promise.all(
+                  batch.map(async ({ tc, fnName, fnArgs }: any) => {
+                    const start = Date.now();
+                    const result = await executeConnectorTool(fnName, fnArgs, connectorUserId, chatId, messageId, pinnedConnectorId);
+                    return { tc, fnName, result, durationMs: Date.now() - start };
+                  })
+                );
+                results.push(...batchResults);
+              }
+
+              toolsDone = true;
+              clearInterval(keepalive);
+
+              for (const { tc, fnName, result, durationMs } of results) {
+                toolMessages.push({
+                  role: "tool",
+                  tool_call_id: tc.id,
+                  content: result.content,
+                });
+                console.log(`[connector-tool] ${fnName} chars=${result.content.length} error=${result.error || false} ms=${durationMs}`);
+              }
+
+              // Inject tool results as context into the conversation
+              // Instead of doing another tool-calling round, inject the data as system context
+              const toolContext = toolMessages
+                .filter(m => m.role === "tool")
+                .map(m => m.content)
+                .join("\n\n---\n\n");
+
+              if (toolContext.length > 0) {
+                const connectorInstruction = `\n\n--- Connector Data ---\nThe following data was retrieved from the user's connected workspace. Use it to answer their question. Include permalinks where available. Summarize with dated bullets.\n\n${toolContext}\n\n--- End Connector Data ---`;
+
+                if (processedMessages.length > 0 && processedMessages[0].role === "system") {
+                  processedMessages[0].content += connectorInstruction;
+                } else {
+                  processedMessages.unshift({ role: "system", content: connectorInstruction });
+                }
+
+                // Extract Slack/Discord permalinks from tool results for the sources row
+                if (pinnedConnector) {
+                  const permalinkRegex = /https:\/\/(?:slack\.com\/archives\/[^\s)]+|discord\.com\/channels\/[^\s)]+)/g;
+                  const channelRegex = /#([\w-]+)/g;
+                  const seenUrls = new Set<string>();
+                  const connectorSources: { url: string; channel: string; time: string }[] = [];
+                  for (const m of toolMessages.filter(m => m.role === "tool")) {
+                    const urls = m.content.match(permalinkRegex) || [];
+                    for (const url of urls) {
+                      if (!seenUrls.has(url) && connectorSources.length < 10) {
+                        seenUrls.add(url);
+                        // Try to extract channel and time from the surrounding context
+                        const lineMatch = m.content.split("\n").find(l => l.includes(url));
+                        const channelMatch = lineMatch?.match(/#([\w-]+)/);
+                        const timeMatch = lineMatch?.match(/\[([A-Z][a-z]+ \d+, \d+:\d+ [AP]M)\]/);
+                        connectorSources.push({
+                          url,
+                          channel: channelMatch ? `#${channelMatch[1]}` : "",
+                          time: timeMatch ? timeMatch[1] : "",
+                        });
+                      }
+                    }
+                  }
+                  if (connectorSources.length > 0) {
+                    sendEvent({
+                      type: "connector_sources",
+                      provider: pinnedConnector,
+                      items: connectorSources,
+                    });
+                  }
+                }
+              }
+
+              sendEvent({ type: "status", text: "" });
+            }
+          }
+        } catch (connErr) {
+          console.error("[connector-tools] tool call phase failed:", connErr);
+          // Continue without connector data — non-fatal
+        }
       }
 
       // 4. Call the AI provider with streaming

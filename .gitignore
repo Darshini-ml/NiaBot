@@ -42,6 +42,9 @@ yarn-error.log*
 /uploads/
 /storage/
 
+# persistent data (SQLite database, etc.)
+/.data/
+
 # vercel
 .vercel
 

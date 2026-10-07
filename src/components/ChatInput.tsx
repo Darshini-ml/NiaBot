@@ -20,6 +20,9 @@ import {
   Loader2,
   Activity,
   Globe,
+  MessageSquare,
+  Hash,
+  Plug,
 } from "lucide-react";
 import ModelSelector, { type ModelOption } from "@/components/ModelSelector";
 import { showToast } from "@/components/Toast";
@@ -51,6 +54,22 @@ const taskLabels: Record<string, string> = {
   code: "Generate code",
 };
 
+export interface ConnectorChipData {
+  provider: "slack" | "discord";
+  connectorId: string;
+  workspaceName: string;
+}
+
+export type ConnectorChip = ConnectorChipData | null;
+
+export interface ConnectorStatus {
+  id: string; // connector row id
+  provider: "slack" | "discord";
+  enabled: boolean;
+  connected: boolean;
+  name: string; // workspace/server name
+}
+
 interface ChatInputProps {
   onSend: (message: string, attachments?: File[], features?: Set<string>) => void;
   isGenerating?: boolean;
@@ -68,6 +87,10 @@ interface ChatInputProps {
   thinkingLevel?: "off" | "low" | "medium" | "high";
   onThinkingChange?: (level: "off" | "low" | "medium" | "high") => void;
   onOpenConfigPanel?: () => void;
+  connectorStatuses?: ConnectorStatus[];
+  activeConnector?: ConnectorChip;
+  onConnectorChange?: (connector: ConnectorChip) => void;
+  onOpenConnectors?: () => void;
 }
 
 function formatFileSize(bytes: number): string {
@@ -89,7 +112,7 @@ function getFileIcon(ext: string) {
   return File;
 }
 
-export default function ChatInput({ onSend, isGenerating, onStop, selectedModel, onModelChange, hasMessages, allAttachments, activeTask, onTaskChange, onRegisterFilePicker, onOpenVoiceMode, webSearchEnabled = true, onToggleWebSearch, thinkingLevel, onThinkingChange, onOpenConfigPanel }: ChatInputProps) {
+export default function ChatInput({ onSend, isGenerating, onStop, selectedModel, onModelChange, hasMessages, allAttachments, activeTask, onTaskChange, onRegisterFilePicker, onOpenVoiceMode, webSearchEnabled = true, onToggleWebSearch, thinkingLevel, onThinkingChange, onOpenConfigPanel, connectorStatuses = [], activeConnector, onConnectorChange, onOpenConnectors }: ChatInputProps) {
   const [input, setInput] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isRecording, setIsRecording] = useState(false);
@@ -223,6 +246,61 @@ export default function ChatInput({ onSend, isGenerating, onStop, selectedModel,
     else startRecording();
   }, [isRecording, startRecording, stopRecording]);
 
+  // Connector suggestion prompts — [channel] triggers a channel picker
+  const connectorSuggestions: Record<string, string[]> = {
+    slack: [
+      "Summarize [channel] — last 7 days",
+      "What decisions were made this week?",
+      "Find messages about ",
+    ],
+    discord: [
+      "Summarize [channel] — last 7 days",
+      "What decisions were made this week?",
+      "Find messages about ",
+    ],
+  };
+
+  // Channel picker state
+  const [channelPickerOpen, setChannelPickerOpen] = useState(false);
+  const [channelPickerTemplate, setChannelPickerTemplate] = useState("");
+  const [channelList, setChannelList] = useState<{ name: string; id: string }[]>([]);
+  const [channelListLoading, setChannelListLoading] = useState(false);
+  const [channelSearch, setChannelSearch] = useState("");
+
+  const fetchChannels = useCallback(async () => {
+    if (channelList.length > 0) return; // already cached
+    setChannelListLoading(true);
+    try {
+      const provider = activeConnector?.provider || "slack";
+      const res = await fetch(`/api/connectors/${provider}/channels`);
+      if (res.ok) {
+        const data = await res.json();
+        setChannelList((data.channels || []).map((ch: any) => ({ name: ch.name?.replace(/^#/, "") || ch.name, id: ch.id })));
+      }
+    } catch { /* ignore */ }
+    setChannelListLoading(false);
+  }, [activeConnector, channelList.length]);
+
+  const handleSuggestionClick = useCallback((suggestion: string) => {
+    if (suggestion.includes("[channel]")) {
+      setChannelPickerTemplate(suggestion);
+      setChannelPickerOpen(true);
+      setChannelSearch("");
+      fetchChannels();
+    } else {
+      setInput(suggestion);
+      textareaRef.current?.focus();
+    }
+  }, [fetchChannels]);
+
+  const handleChannelSelect = useCallback((channelName: string) => {
+    const filled = channelPickerTemplate.replace("[channel]", `#${channelName}`);
+    setInput(filled);
+    setChannelPickerOpen(false);
+    setChannelPickerTemplate("");
+    textareaRef.current?.focus();
+  }, [channelPickerTemplate]);
+
   const handleSend = () => {
     if (input.trim() || pendingAttachments.length > 0) {
       if (isRecording) stopRecording();
@@ -241,9 +319,10 @@ export default function ChatInput({ onSend, isGenerating, onStop, selectedModel,
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
-    // Backspace on empty textarea clears the task
-    if (e.key === "Backspace" && !input && activeTask) {
-      onTaskChange?.(null);
+    // Backspace on empty textarea clears the task or connector chip
+    if (e.key === "Backspace" && !input) {
+      if (activeTask) onTaskChange?.(null);
+      else if (activeConnector) onConnectorChange?.(null);
     }
   };
 
@@ -592,6 +671,22 @@ export default function ChatInput({ onSend, isGenerating, onStop, selectedModel,
             </div>
           )}
 
+          {/* Connector chip */}
+          {activeConnector && (
+            <div className="flex items-center gap-2 px-5 pt-3 animate-fade-in">
+              <span className="flex items-center gap-1.5 px-2.5 py-1 text-[12px] font-medium rounded-full bg-[var(--accent-subtle)] text-[var(--accent)] border border-[var(--accent-border)]">
+                {activeConnector.provider === "slack" ? <Hash size={12} /> : <MessageSquare size={12} />}
+                {activeConnector.provider === "slack" ? "Slack" : "Discord"}
+                {activeConnector.workspaceName && (
+                  <span className="opacity-70">· {activeConnector.workspaceName}</span>
+                )}
+                <button onClick={() => onConnectorChange?.(null)} className="ml-0.5 hover:text-white transition-colors">
+                  <X size={11} />
+                </button>
+              </span>
+            </div>
+          )}
+
           {/* Textarea row */}
           <div className="flex items-start gap-3 px-5 pt-4 pb-2 relative">
             <textarea
@@ -611,12 +706,81 @@ export default function ChatInput({ onSend, isGenerating, onStop, selectedModel,
                 target.style.height = Math.min(target.scrollHeight, 200) + "px";
               }}
             />
-            {isFocused && !input && !activeTask && (
+            {isFocused && !input && !activeTask && !activeConnector && (
               <span className="absolute right-5 bottom-2 text-[12px] text-[var(--text-faint)] pointer-events-none animate-fade-in">
                 Press <kbd className="px-1 py-0.5 rounded bg-[var(--bg-hover)] text-[var(--text-muted)] text-[11px] font-mono">/</kbd> for commands
               </span>
             )}
           </div>
+
+          {/* Connector suggestion prompts */}
+          {activeConnector && !input.trim() && !channelPickerOpen && (
+            <div className="flex flex-wrap gap-2 px-5 pb-1 animate-fade-in">
+              {connectorSuggestions[activeConnector.provider]?.map((suggestion, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleSuggestionClick(suggestion)}
+                  className="px-3 py-1.5 text-[12px] rounded-full transition-colors"
+                  style={{
+                    background: "var(--bg-tertiary)",
+                    color: "var(--text-muted)",
+                    border: "1px solid var(--border)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-primary)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-tertiary)"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Channel picker dropdown */}
+          {channelPickerOpen && (
+            <div className="mx-5 mb-1 rounded-lg border animate-fade-in" style={{ background: "var(--bg-secondary)", borderColor: "var(--border)", maxHeight: 220, overflow: "hidden" }}>
+              <div className="px-3 py-2 border-b" style={{ borderColor: "var(--border)" }}>
+                <input
+                  autoFocus
+                  type="text"
+                  placeholder="Search channels..."
+                  value={channelSearch}
+                  onChange={(e) => setChannelSearch(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") { setChannelPickerOpen(false); }
+                  }}
+                  className="w-full bg-transparent text-[13px] outline-none"
+                  style={{ color: "var(--text-primary)" }}
+                />
+              </div>
+              <div style={{ maxHeight: 170, overflowY: "auto" }}>
+                {channelListLoading && (
+                  <div className="flex items-center gap-2 px-3 py-3 text-[12px]" style={{ color: "var(--text-muted)" }}>
+                    <Loader2 size={14} className="animate-spin" /> Loading channels...
+                  </div>
+                )}
+                {!channelListLoading && channelList.length === 0 && (
+                  <div className="px-3 py-3 text-[12px]" style={{ color: "var(--text-muted)" }}>No channels found</div>
+                )}
+                {channelList
+                  .filter(ch => !channelSearch || ch.name.toLowerCase().includes(channelSearch.toLowerCase()))
+                  .slice(0, 20)
+                  .map((ch) => (
+                    <button
+                      key={ch.id}
+                      onClick={() => handleChannelSelect(ch.name)}
+                      className="w-full text-left px-3 py-1.5 text-[13px] transition-colors flex items-center gap-2"
+                      style={{ color: "var(--text-primary)" }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                    >
+                      <Hash size={12} style={{ color: "var(--text-faint)" }} />
+                      {ch.name}
+                    </button>
+                  ))
+                }
+              </div>
+            </div>
+          )}
 
           {/* Toolbar */}
           <div className="flex items-center justify-between px-4 pb-3">
@@ -713,6 +877,74 @@ export default function ChatInput({ onSend, isGenerating, onStop, selectedModel,
                         <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>Browse and search your files</div>
                       </div>
                     </button>
+
+                    {/* Connectors group */}
+                    {(() => {
+                      const connected = connectorStatuses.filter(c => c.connected && c.enabled);
+                      const notConnected = (["slack", "discord"] as const).filter(
+                        p => !connectorStatuses.some(c => c.provider === p && c.connected)
+                      );
+                      if (connected.length === 0 && notConnected.length === 0) return null;
+                      return (
+                        <>
+                          <div style={{ height: 1, background: "var(--border)", margin: "4px 8px" }} />
+                          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-faint)", padding: "6px 12px 2px", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                            Connectors
+                          </div>
+                          {connected.map(c => (
+                            <button
+                              key={c.id}
+                              onClick={() => {
+                                closeAttachMenu();
+                                onConnectorChange?.({ provider: c.provider, connectorId: c.id, workspaceName: c.name });
+                              }}
+                              className="w-full flex items-center gap-3 px-3 transition-colors text-left"
+                              style={{ minHeight: 44, borderRadius: 10 }}
+                              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                            >
+                              <div className="flex items-center justify-center shrink-0" style={{ width: 36, height: 36, borderRadius: 10, background: "var(--bg-hover)" }}>
+                                {c.provider === "slack" ? <Hash size={18} style={{ color: "var(--text-muted)" }} /> : <MessageSquare size={18} style={{ color: "var(--text-muted)" }} />}
+                              </div>
+                              <div>
+                                <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)" }}>
+                                  {c.provider === "slack" ? "Slack" : "Discord"}
+                                  {c.name && <span style={{ fontWeight: 400, opacity: 0.7 }}> · {c.name}</span>}
+                                </div>
+                                <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
+                                  Read and search messages
+                                </div>
+                              </div>
+                            </button>
+                          ))}
+                          {notConnected.map(provider => (
+                            <button
+                              key={provider}
+                              onClick={() => {
+                                closeAttachMenu();
+                                onOpenConnectors?.();
+                              }}
+                              className="w-full flex items-center gap-3 px-3 transition-colors text-left"
+                              style={{ minHeight: 44, borderRadius: 10, opacity: 0.6 }}
+                              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                            >
+                              <div className="flex items-center justify-center shrink-0" style={{ width: 36, height: 36, borderRadius: 10, background: "var(--bg-hover)" }}>
+                                {provider === "slack" ? <Hash size={18} style={{ color: "var(--text-muted)" }} /> : <MessageSquare size={18} style={{ color: "var(--text-muted)" }} />}
+                              </div>
+                              <div>
+                                <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)" }}>
+                                  Connect {provider === "slack" ? "Slack" : "Discord"}…
+                                </div>
+                                <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
+                                  Set up in Connectors
+                                </div>
+                              </div>
+                            </button>
+                          ))}
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>,
                 document.body

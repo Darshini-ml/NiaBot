@@ -40,4 +40,13 @@ export function validateConfig(): void {
   console.log(
     `[config] NIA_GATEWAY_URL=${NIA_GATEWAY_URL} NIA_APP_URL=${NIA_APP_URL}`
   );
+
+  // Print connector OAuth redirect URIs so the user can paste them into app settings
+  const connectorBase = process.env.APP_BASE_URL || NIA_APP_URL;
+  if (process.env.SLACK_CLIENT_ID) {
+    console.log(`[connectors] Slack redirect URI: ${connectorBase}/api/connectors/slack/callback`);
+  }
+  if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
+    console.log(`[connectors] Discord redirect URI: ${connectorBase}/api/connectors/discord/callback`);
+  }
 }

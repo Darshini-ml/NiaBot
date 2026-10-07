@@ -107,6 +107,15 @@ function truncateError(msg: string): string {
   return clean.length > 180 ? clean.slice(0, 177) + '…' : clean;
 }
 
+/** Strip Discord mentions (<@123>, <@!123>, <@&123>, <#123>), collapse whitespace, preserve line breaks. */
+function stripMentions(raw: string): string {
+  return raw
+    .split('\n')
+    .map(line => line.replace(/<@[!&]?\d+>/g, '').replace(/<#\d+>/g, '').replace(/\s+/g, ' ').trim())
+    .filter(line => line.length > 0)
+    .join('\n');
+}
+
 // ─── Core: handle a message and stream the response ──────────────────────────
 
 async function handleMessage(
@@ -134,8 +143,10 @@ async function handleMessage(
 
   if (!isDm && message.channel.type === ChannelType.GuildText) {
     try {
-      // Strip mentions (<@123>, <@!123>, <@&123>), collapse whitespace, max 80 chars
-      const threadName = text.replace(/<@[!&]?\d+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'NiaAI chat';
+      const stripped = stripMentions(text);
+      let threadName = stripped.replace(/\n/g, ' ').trim();
+      if (!threadName) threadName = 'NiaAI conversation';
+      if (threadName.length > 90) threadName = threadName.slice(0, 89) + '…';
       thread = await message.startThread({ name: threadName });
       replyChannel = thread;
     } catch {
@@ -462,7 +473,7 @@ client.on(Events.MessageCreate, async (message) => {
 
   // ── DMs: always respond ──
   if (isDm) {
-    const text = message.content.replace(/<@!?\d+>/g, '').trim();
+    const text = stripMentions(message.content);
     if (!text && message.attachments.size === 0) return;
 
     const threadKey = `dm:${message.author.id}`;
@@ -482,7 +493,7 @@ client.on(Events.MessageCreate, async (message) => {
     // Also respond if @mentioned in thread
     if (!botIsMember && !isMentioned) return;
 
-    const text = message.content.replace(/<@!?\d+>/g, '').trim();
+    const text = stripMentions(message.content);
     if (!text && message.attachments.size === 0) return;
 
     const guildId = message.guild?.id || null;
@@ -497,7 +508,7 @@ client.on(Events.MessageCreate, async (message) => {
 
   // ── Channel mention: @NiaAI ──
   if (isMentioned) {
-    const text = message.content.replace(/<@!?\d+>/g, '').trim();
+    const text = stripMentions(message.content);
     if (!text && message.attachments.size === 0) return;
 
     const guildId = message.guild?.id || null;

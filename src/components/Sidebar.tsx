@@ -1,15 +1,17 @@
 "use client";
 
-import { useState, useMemo, useRef, useCallback } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import {
   Plus,
   ChevronDown,
+  ChevronRight,
   PanelLeftClose,
   FolderOpen,
   MoreHorizontal,
   Zap,
   MessageCircle,
   Activity,
+  Plug,
 } from "lucide-react";
 import type { Project, ProjectPreviewKind } from "./ProjectsView";
 import { detectCategory, CATEGORY_PALETTES, hashString } from "./ProjectsView";
@@ -24,6 +26,8 @@ export type NavView =
   | "explore"
   | "automations"
   | "logs"
+  | "connectors"
+  | "connector-detail"
 ;
 
 export interface SidebarChat {
@@ -55,6 +59,7 @@ interface SidebarProps {
   onOpenProject?: (projectId: string) => void;
   onCreateProject?: () => void;
   onCommandPalette?: () => void;
+  onOpenConnectorDetail?: (provider: "slack" | "discord") => void;
   userName?: string;
 }
 
@@ -268,10 +273,16 @@ export default function Sidebar({
   projects = [],
   onOpenProject,
   onCommandPalette,
+  onOpenConnectorDetail,
   userName,
   onLogout,
 }: SidebarProps) {
   const [workspacesExpanded, setWorkspacesExpanded] = useState(true);
+  const [connectorsHover, setConnectorsHover] = useState(false);
+  const [connectorsFlyout, setConnectorsFlyout] = useState(false);
+  const [connectorStatuses, setConnectorStatuses] = useState<Record<string, { id: string; enabled: boolean; name: string }[]>>({});
+  const [connectorConfig, setConnectorConfig] = useState<Record<string, boolean> | null>(null);
+  const connectorsRef = useRef<HTMLDivElement>(null);
   const [hoveredChatId, setHoveredChatId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ chat: SidebarChat; x: number; y: number; anchorRect?: DOMRect | null } | null>(null);
   const [plusRotation, setPlusRotation] = useState(0);
@@ -309,6 +320,111 @@ export default function Sidebar({
     }
     setRenamingChatId(null);
   }, [renameValue, chats, onRenameChat]);
+
+  // Fetch connector statuses + config for the flyout
+  const fetchConnectorStatuses = useCallback(async () => {
+    try {
+      const res = await fetch("/api/connectors");
+      if (!res.ok) return;
+      const data = await res.json();
+      const map: Record<string, { id: string; enabled: boolean; name: string }[]> = {};
+      for (const c of data.connectors || []) {
+        if (!map[c.provider]) map[c.provider] = [];
+        map[c.provider].push({ id: c.id, enabled: c.enabled, name: c.external_name || c.external_id });
+      }
+      setConnectorStatuses(map);
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => {
+    fetchConnectorStatuses();
+  }, [fetchConnectorStatuses, activeView]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadConfig() {
+      try {
+        const res = await fetch("/api/connectors/config");
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setConnectorConfig(data);
+      } catch { /* silent */ }
+    }
+    loadConfig();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Refresh connector statuses after OAuth callback (?connected=...)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connected") || params.get("connectorSuccess")) {
+      fetchConnectorStatuses();
+    }
+  }, [fetchConnectorStatuses]);
+
+  // Close flyout on outside click or Escape
+  useEffect(() => {
+    if (!connectorsFlyout) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (connectorsRef.current && !connectorsRef.current.contains(e.target as Node)) {
+        setConnectorsFlyout(false);
+        setConnectorsHover(false);
+      }
+    }
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setConnectorsFlyout(false);
+        setConnectorsHover(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [connectorsFlyout]);
+
+  const isProviderConfigured = useCallback((provider: string): boolean => {
+    if (!connectorConfig) return true; // Don't block while loading
+    if (!connectorConfig.encryption) return false;
+    return connectorConfig[provider] ?? false;
+  }, [connectorConfig]);
+
+  const handleConnectorToggle = useCallback(async (provider: string, connectorId: string, enabled: boolean) => {
+    // Optimistic update
+    setConnectorStatuses((prev) => ({
+      ...prev,
+      [provider]: (prev[provider] || []).map(c => c.id === connectorId ? { ...c, enabled } : c),
+    }));
+    try {
+      await fetch(`/api/connectors/${provider}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled, id: connectorId }),
+      });
+    } catch {
+      // Revert on error
+      setConnectorStatuses((prev) => ({
+        ...prev,
+        [provider]: (prev[provider] || []).map(c => c.id === connectorId ? { ...c, enabled: !enabled } : c),
+      }));
+    }
+  }, []);
+
+  const handleConnectorRowClick = useCallback((provider: string) => {
+    if (!isProviderConfigured(provider)) return; // disabled row
+    const workspaces = connectorStatuses[provider];
+    if (!workspaces || workspaces.length === 0) {
+      // Not connected → start OAuth
+      window.location.href = `/api/connectors/${provider}/start`;
+    } else {
+      // Connected → navigate to detail page
+      onOpenConnectorDetail?.(provider as "slack" | "discord");
+    }
+    setConnectorsFlyout(false);
+    setConnectorsHover(false);
+  }, [connectorStatuses, isProviderConfigured, onOpenConnectorDetail]);
 
   /* ─── Collapsed mode ─── */
   if (collapsed) return null;
@@ -482,6 +598,119 @@ export default function Sidebar({
           <Activity size={15} strokeWidth={1.8} />
           <span className="flex-1 text-left text-[13px]">Logs</span>
         </button>
+      </div>
+
+      {/* ── Connectors row with flyout ── */}
+      <div className="px-2 pt-1 pb-0 relative" ref={connectorsRef}
+        onMouseEnter={() => { setConnectorsHover(true); setConnectorsFlyout(true); }}
+        onMouseLeave={() => { setConnectorsHover(false); setConnectorsFlyout(false); }}
+      >
+        <button
+          onClick={() => setConnectorsFlyout((v) => !v)}
+          className={`w-full flex items-center gap-2.5 px-3 rounded-[9px] transition-all duration-150 ${
+            activeView === "connectors"
+              ? "bg-[var(--sidebar-active)] text-[var(--text-primary)]"
+              : "text-[var(--text-muted)] hover:bg-[var(--sidebar-hover)]"
+          }`}
+          style={{ height: 36 }}
+        >
+          <Plug size={15} strokeWidth={1.8} />
+          <span className="flex-1 text-left text-[13px]">Connectors</span>
+          <ChevronRight size={12} className="text-[var(--text-faint)] opacity-60" />
+        </button>
+
+        {/* Flyout */}
+        {connectorsFlyout && (
+          <div
+            className="absolute left-full top-0 ml-1 z-50 w-56 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] shadow-xl overflow-hidden"
+            style={{ animation: "scaleIn 120ms cubic-bezier(.2,.8,.2,1)" }}
+          >
+            {/* Provider rows */}
+            {(["slack", "discord"] as const).map((provider) => {
+              const configured = isProviderConfigured(provider);
+              const workspaces = connectorStatuses[provider] || [];
+              const label = provider === "slack" ? "Slack" : "Discord";
+              const icon = provider === "slack" ? "💬" : "🎮";
+
+              return (
+                <div key={provider}>
+                  {/* Provider header */}
+                  <div
+                    onClick={() => handleConnectorRowClick(provider)}
+                    className={`flex items-center gap-2.5 px-3 py-2.5 transition-colors ${
+                      configured ? "hover:bg-[var(--bg-hover)] cursor-pointer" : "opacity-50 cursor-not-allowed"
+                    }`}
+                    title={!configured ? "Not set up on this server yet" : undefined}
+                  >
+                    <span className="text-sm">{icon}</span>
+                    <span className="flex-1 text-[13px] text-[var(--text-primary)]">{label}</span>
+                    {!configured ? (
+                      <span className="text-[10px] text-[var(--text-faint)] italic">Not configured</span>
+                    ) : workspaces.length === 0 ? (
+                      <span className="text-[11px] text-[var(--text-faint)]">Not connected</span>
+                    ) : (
+                      <span className="text-[10px] text-[var(--text-faint)]">{workspaces.length} connected</span>
+                    )}
+                  </div>
+
+                  {/* Per-workspace rows */}
+                  {workspaces.map((ws) => (
+                    <div
+                      key={ws.id}
+                      className="flex items-center gap-2 pl-9 pr-3 py-1.5 hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+                      onClick={() => {
+                        setConnectorsFlyout(false);
+                        setConnectorsHover(false);
+                        onOpenConnectorDetail?.(provider);
+                      }}
+                    >
+                      <span className="flex-1 text-[12px] text-[var(--text-secondary)] truncate">{ws.name}</span>
+                      <div className="flex items-center gap-1.5">
+                        {!ws.enabled && (
+                          <span className="text-[10px] text-[var(--text-faint)]">Paused</span>
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleConnectorToggle(provider, ws.id, !ws.enabled); }}
+                          className="relative w-8 h-[18px] rounded-full transition-colors duration-200"
+                          style={{
+                            background: ws.enabled ? "var(--accent)" : "var(--bg-hover)",
+                            border: `1px solid ${ws.enabled ? "var(--accent)" : "var(--border)"}`,
+                          }}
+                        >
+                          <div
+                            className="absolute top-[2px] w-3 h-3 rounded-full bg-white transition-transform duration-200"
+                            style={{ transform: ws.enabled ? "translateX(15px)" : "translateX(2px)" }}
+                          />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+
+            {/* Divider */}
+            <div className="mx-2 border-t border-[var(--border)]" />
+
+            {/* Add connector — scrolls to first unconnected */}
+            <button
+              onClick={() => { setConnectorsFlyout(false); setConnectorsHover(false); onNavigate("connectors"); }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors"
+            >
+              <Plus size={13} />
+              Add connector
+            </button>
+
+            {/* Manage connectors */}
+            <button
+              onClick={() => { setConnectorsFlyout(false); setConnectorsHover(false); onNavigate("connectors"); }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors"
+            >
+              <Plug size={13} />
+              Manage connectors
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── Automations row ── */}

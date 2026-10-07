@@ -24,6 +24,8 @@ import type { Automation, AutomationTemplate } from "@/lib/automations";
 import VoiceMode from "@/components/VoiceMode";
 import ConfigureModelsPanel from "@/components/ConfigureModelsPanel";
 import LogsPage from "@/components/LogsPage";
+import ConnectorsPage from "@/components/ConnectorsPage";
+import ConnectorDetailPage from "@/components/ConnectorDetailPage";
 
 function parseTargetPages(text: string): { target: number; strict: boolean } | null {
   const WORD_NUMS: Record<string, number> = {
@@ -112,6 +114,9 @@ export default function Home() {
   const [configPanelOpen, setConfigPanelOpen] = useState(false);
   const [configPanelFilterChatId, setConfigPanelFilterChatId] = useState<string | undefined>(undefined);
   const [usagePopoverOpen, setUsagePopoverOpen] = useState(false);
+  const [activeConnector, setActiveConnector] = useState<import("@/components/ChatInput").ConnectorChip>(null);
+  const [connectorStatuses, setConnectorStatuses] = useState<import("@/components/ChatInput").ConnectorStatus[]>([]);
+  const [detailProvider, setDetailProvider] = useState<"slack" | "discord">("slack");
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -139,6 +144,35 @@ export default function Home() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+
+  // Handle OAuth callback redirect: ?view=connectors&connected=slack
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const viewParam = params.get("view");
+    if (viewParam === "connectors") {
+      setActiveView("connectors");
+    }
+  }, []);
+
+  // Fetch connector statuses for the composer menu
+  useEffect(() => {
+    async function fetchConnectors() {
+      try {
+        const res = await fetch("/api/connectors");
+        if (!res.ok) return;
+        const data = await res.json();
+        const statuses: import("@/components/ChatInput").ConnectorStatus[] = (data.connectors || []).map((c: any) => ({
+          id: c.id,
+          provider: c.provider,
+          enabled: c.enabled,
+          connected: c.status === "connected",
+          name: c.external_name || c.provider,
+        }));
+        setConnectorStatuses(statuses);
+      } catch { /* ignore */ }
+    }
+    fetchConnectors();
+  }, [activeView]); // re-fetch when switching views (e.g. after connecting)
 
   // Validate selected model against live catalog — fallback if it disappears
   useEffect(() => {
@@ -614,6 +648,7 @@ export default function Home() {
     }
 
     const currentTask = activeTask;
+    const currentConnector = activeConnector;
     const parsedPages = parseTargetPages(text);
     const userMsgId = Date.now();
     const userMsg: Message = {
@@ -622,6 +657,7 @@ export default function Home() {
       attachments: attachments?.map((f) => ({ name: f.name, type: f.type })),
       isUploading: attachments && attachments.length > 0 ? true : undefined,
       task: currentTask,
+      connector: currentConnector,
     };
 
     // Add user message immediately (shows "Reading…" chip while uploading)
@@ -716,7 +752,7 @@ export default function Home() {
     try {
       const res = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: allMessages, model: selectedModel.modelId, stream: true, task: currentTask, web_search: webSearchEnabled, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, target_pages: parsedPages?.target, strict_pages: parsedPages?.strict, provider: selectedModel.provider || "niaai", thinking: thinkingLevel, chatId, messageId: String(aiMsgId), chatTitle: activeConv?.title || "" }),
+        body: JSON.stringify({ messages: allMessages, model: selectedModel.modelId, stream: true, task: currentTask, web_search: webSearchEnabled, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, target_pages: parsedPages?.target, strict_pages: parsedPages?.strict, provider: selectedModel.provider || "niaai", thinking: thinkingLevel, chatId, messageId: String(aiMsgId), chatTitle: activeConv?.title || "", connector: currentConnector?.provider || undefined, connectorId: currentConnector?.connectorId || undefined }),
         signal: controller.signal,
       });
       if (!res.ok) { const t = await res.text(); throw new Error(t || `API error: ${res.status}`); }
@@ -802,6 +838,16 @@ export default function Home() {
               setConversations((prev) =>
                 prev.map((c) =>
                   c.id === chatId ? { ...c, messages: c.messages.map((m) => m.id === aiMsgId ? { ...m, sources: collectedSources, webSearchUsed: true } : m) } : c
+                )
+              );
+              continue;
+            }
+
+            // Connector sources (Slack/Discord permalinks)
+            if (parsed.type === "connector_sources") {
+              setConversations((prev) =>
+                prev.map((c) =>
+                  c.id === chatId ? { ...c, messages: c.messages.map((m) => m.id === aiMsgId ? { ...m, connectorSearchUsed: parsed.provider, connectorSources: parsed.items } : m) } : c
                 )
               );
               continue;
@@ -1423,7 +1469,7 @@ export default function Home() {
               )}
             </div>
             {activeChatId && (
-              <ChatInput onSend={handleSend} isGenerating={isGenerating} onStop={handleStop} selectedModel={selectedModel} onModelChange={setSelectedModel} hasMessages={messages.length > 0} activeTask={activeTask} onTaskChange={setActiveTask} onRegisterFilePicker={(fn) => { filePickerTriggerRef.current = fn; }} onOpenVoiceMode={() => setVoiceModeOpen(true)} webSearchEnabled={webSearchEnabled} onToggleWebSearch={() => setWebSearchEnabled((v) => !v)} thinkingLevel={thinkingLevel} onThinkingChange={setThinkingLevel} onOpenConfigPanel={() => setConfigPanelOpen(true)} />
+              <ChatInput onSend={handleSend} isGenerating={isGenerating} onStop={handleStop} selectedModel={selectedModel} onModelChange={setSelectedModel} hasMessages={messages.length > 0} activeTask={activeTask} onTaskChange={setActiveTask} onRegisterFilePicker={(fn) => { filePickerTriggerRef.current = fn; }} onOpenVoiceMode={() => setVoiceModeOpen(true)} webSearchEnabled={webSearchEnabled} onToggleWebSearch={() => setWebSearchEnabled((v) => !v)} thinkingLevel={thinkingLevel} onThinkingChange={setThinkingLevel} onOpenConfigPanel={() => setConfigPanelOpen(true)} connectorStatuses={connectorStatuses} activeConnector={activeConnector} onConnectorChange={setActiveConnector} onOpenConnectors={() => setActiveView("connectors")} />
             )}
           </>
         );
@@ -1433,6 +1479,39 @@ export default function Home() {
 
       case "logs":
         return <LogsPage deletedChats={deletedChatsMap} />;
+
+      case "connectors":
+        return (
+          <ConnectorsPage
+            onBack={() => setActiveView("chat")}
+            onNewChat={(seedPrompt) => {
+              setActiveView("chat");
+              if (seedPrompt) handleSend(seedPrompt);
+            }}
+            onOpenDetail={(provider: "slack" | "discord") => {
+              setDetailProvider(provider);
+              setActiveView("connector-detail");
+            }}
+          />
+        );
+
+      case "connector-detail":
+        return (
+          <ConnectorDetailPage
+            provider={detailProvider}
+            onBack={() => setActiveView("connectors")}
+            onNewChat={(seedPrompt, connector, accountId, accountName) => {
+              setActiveConnector(
+                accountId
+                  ? { provider: connector, connectorId: accountId, workspaceName: accountName || connector }
+                  : { provider: connector, connectorId: "", workspaceName: connector === "slack" ? "Slack" : "Discord" }
+              );
+              setActiveView("chat");
+              if (seedPrompt) handleSend(seedPrompt);
+            }}
+            onOpenConnectors={() => setActiveView("connectors")}
+          />
+        );
 
       case "explore":
         return <WebSearchView onBack={() => setActiveView("chat")} />;
@@ -1479,7 +1558,7 @@ export default function Home() {
                 </div>
               )}
             </div>
-            <ChatInput onSend={handleSend} isGenerating={isGenerating} onStop={handleStop} selectedModel={selectedModel} onModelChange={setSelectedModel} hasMessages={messages.length > 0} activeTask={activeTask} onTaskChange={setActiveTask} onRegisterFilePicker={(fn) => { filePickerTriggerRef.current = fn; }} onOpenVoiceMode={() => setVoiceModeOpen(true)} webSearchEnabled={webSearchEnabled} onToggleWebSearch={() => setWebSearchEnabled((v) => !v)} thinkingLevel={thinkingLevel} onThinkingChange={setThinkingLevel} onOpenConfigPanel={() => setConfigPanelOpen(true)} />
+            <ChatInput onSend={handleSend} isGenerating={isGenerating} onStop={handleStop} selectedModel={selectedModel} onModelChange={setSelectedModel} hasMessages={messages.length > 0} activeTask={activeTask} onTaskChange={setActiveTask} onRegisterFilePicker={(fn) => { filePickerTriggerRef.current = fn; }} onOpenVoiceMode={() => setVoiceModeOpen(true)} webSearchEnabled={webSearchEnabled} onToggleWebSearch={() => setWebSearchEnabled((v) => !v)} thinkingLevel={thinkingLevel} onThinkingChange={setThinkingLevel} onOpenConfigPanel={() => setConfigPanelOpen(true)} connectorStatuses={connectorStatuses} activeConnector={activeConnector} onConnectorChange={setActiveConnector} onOpenConnectors={() => setActiveView("connectors")} />
           </>
         );
     }
@@ -1511,6 +1590,10 @@ export default function Home() {
         onOpenProject={handleOpenProject}
         onCreateProject={() => setActiveView("projects")}
         onCommandPalette={() => setCommandPaletteOpen(true)}
+        onOpenConnectorDetail={(provider) => {
+          setDetailProvider(provider);
+          setActiveView("connector-detail");
+        }}
         userName={currentUser?.name}
       />
 

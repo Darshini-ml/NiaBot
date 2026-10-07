@@ -16,7 +16,9 @@ export type UsageKind =
   | "voice"
   | "guard"
   | "tool_link"
-  | "tool_file";
+  | "tool_file"
+  | "tool_slack"
+  | "tool_discord";
 
 export interface UsageRecord {
   chat_id?: string;

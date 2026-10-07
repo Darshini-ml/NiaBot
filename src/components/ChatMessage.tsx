@@ -1,6 +1,6 @@
 "use client";
 
-import { Copy, ThumbsUp, ThumbsDown, RotateCcw, Volume2, Check, VolumeX, Mic, Download, ImageIcon, X, RefreshCw, ChevronDown, ChevronUp, AlertTriangle, Paperclip, Globe, ExternalLink, FileText, ZoomIn, ZoomOut, Maximize, ArrowLeft, ArrowRight, Info } from "lucide-react";
+import { Copy, ThumbsUp, ThumbsDown, RotateCcw, Volume2, Check, VolumeX, Mic, Download, ImageIcon, X, RefreshCw, ChevronDown, ChevronUp, AlertTriangle, Paperclip, Globe, ExternalLink, FileText, ZoomIn, ZoomOut, Maximize, ArrowLeft, ArrowRight, Info, Hash, MessageSquare } from "lucide-react";
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
@@ -85,6 +85,8 @@ export interface Message {
   searchStatus?: string | null;
   sources?: SourceItem[];
   webSearchUsed?: boolean;
+  connectorSearchUsed?: "slack" | "discord" | null;
+  connectorSources?: { url: string; channel: string; time: string }[];
   sourcesLatestDate?: string | null;
   searchReadCount?: number | null;
   linkCards?: LinkCardData[];
@@ -97,6 +99,7 @@ export interface Message {
     via?: string;
     actions?: string[];
   } | null;
+  connector?: { provider: "slack" | "discord"; connectorId?: string; workspaceName?: string } | "slack" | "discord" | null;
   // Model & usage metadata
   modelId?: string;
   modelProvider?: string;
@@ -1417,6 +1420,26 @@ function SearchInfoLine({ sources, readCount }: { sources: SourceItem[]; readCou
   );
 }
 
+/* ---- Connector sources row (Slack/Discord permalinks) ---- */
+function ConnectorSourcesLine({ provider, sources }: { provider: "slack" | "discord"; sources: { url: string; channel: string; time: string }[] }) {
+  const label = provider === "slack" ? "Slack" : "Discord";
+  // Dedupe by channel, show channel · time
+  const deduped = sources.slice(0, 6);
+  return (
+    <div className="flex items-center gap-2 py-0.5 animate-fade-in flex-wrap">
+      {provider === "slack" ? <Hash size={11} className="text-[var(--text-faint)]" /> : <MessageSquare size={11} className="text-[var(--text-faint)]" />}
+      <span className="text-[11px] text-[var(--text-faint)] font-medium">
+        {label} · {deduped.map((s, i) => (
+          <span key={i}>
+            {i > 0 && " · "}
+            <a href={s.url} target="_blank" rel="noopener noreferrer" className="hover:text-[var(--text-muted)] underline underline-offset-2">{s.channel || s.time || `[${i + 1}]`}</a>
+          </span>
+        ))}
+      </span>
+    </div>
+  );
+}
+
 /* ---- Search status indicator ---- */
 function SearchStatusLine({ text }: { text: string }) {
   const isError = text === "Web search unavailable";
@@ -1674,6 +1697,18 @@ export default function ChatMessage({ message, onRegenerate, onRegenerateImage, 
       <div className="flex justify-end animate-bubble-in">
         <div className="max-w-[80%] flex flex-col items-end gap-0.5">
           <div className="px-4 py-3 text-[13.5px] leading-[1.6] bg-[var(--bg-tertiary)] text-[var(--text-primary)]" style={{ borderRadius: "20px 20px 6px 20px" }}>
+            {message.connector && (() => {
+              const cp = typeof message.connector === "string" ? message.connector : message.connector.provider;
+              const wn = typeof message.connector === "object" && message.connector?.workspaceName;
+              return (
+                <span className="inline-flex items-center gap-1 mr-1.5 text-[11px] font-medium text-[var(--accent)] align-middle">
+                  {cp === "slack" ? <Hash size={11} /> : <MessageSquare size={11} />}
+                  {cp === "slack" ? "Slack" : "Discord"}
+                  {wn && <span className="opacity-70">· {wn}</span>}
+                  <span className="text-[var(--text-faint)]">·</span>
+                </span>
+              );
+            })()}
             {message.content}
           </div>
           {/* Attachments with extraction status */}
@@ -1744,17 +1779,28 @@ export default function ChatMessage({ message, onRegenerate, onRegenerateImage, 
           {message.via === "voice" && <Mic size={10} className="text-[var(--accent)]" />}
           <span className="text-[10px] text-[var(--text-faint)]">&middot; {message.modelLabel || modelName || "Fast"}</span>
           <InfoPopoverButton message={message} />
-          {message.webSearchUsed && (
+          {message.webSearchUsed && !message.connectorSearchUsed && (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[var(--accent-subtle)] text-[var(--accent)] text-[9px] font-bold uppercase tracking-wide">
               <Globe size={9} />
               Web
             </span>
           )}
+          {message.connectorSearchUsed && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide" style={{ background: message.connectorSearchUsed === "slack" ? "rgba(74,21,75,0.2)" : "rgba(88,101,242,0.2)", color: message.connectorSearchUsed === "slack" ? "#e0a8e0" : "#8b9bf7" }}>
+              {message.connectorSearchUsed === "slack" ? <Hash size={9} /> : <MessageSquare size={9} />}
+              {message.connectorSearchUsed === "slack" ? "Slack" : "Discord"}
+            </span>
+          )}
         </div>
 
         {/* Freshness header — replaces the spinner row once tokens start */}
-        {message.webSearchUsed && message.sources && message.sources.length > 0 && !message.searchStatus && (
+        {message.webSearchUsed && !message.connectorSearchUsed && message.sources && message.sources.length > 0 && !message.searchStatus && (
           <SearchInfoLine sources={message.sources} readCount={message.searchReadCount} />
+        )}
+
+        {/* Connector sources row */}
+        {message.connectorSearchUsed && message.connectorSources && message.connectorSources.length > 0 && !message.searchStatus && (
+          <ConnectorSourcesLine provider={message.connectorSearchUsed} sources={message.connectorSources} />
         )}
 
         {/* Search status */}
